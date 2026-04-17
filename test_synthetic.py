@@ -4,7 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from terrain_toolkit import HeightMapBuilder, gaussian_smooth
+from terrain_toolkit import TerrainPipeline, TraversabilityConfig
 
 BOUNDS = (-5.0, 5.0, -5.0, 5.0)
 RESOLUTION = 0.1
@@ -67,12 +67,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dropout-frac", type=float, default=None)
     p.add_argument("--smooth-sigma", type=float, default=1.5)
     p.add_argument("--cloud-max-points", type=int, default=20_000,
-                   help="Downsample cap for the raw cloud scatter (0 disables panel).")
+                   help="Downsample cap for the raw cloud scatter.")
     args = p.parse_args()
-    # Apply preset, then override with any explicit flags.
     cfg = dict(presets[args.preset])
     for k in ("noise_std", "outlier_frac", "outlier_std", "dropout_frac"):
-        v = getattr(args, k.replace("_", "_"))
+        v = getattr(args, k)
         if v is not None:
             cfg[k] = v
     args.cfg = cfg
@@ -84,65 +83,107 @@ def main() -> None:
     pts = make_synthetic_cloud(n=args.n, seed=args.seed, **args.cfg)
     print(f"preset={args.preset} cfg={args.cfg} points={len(pts)}")
 
-    builder_max = HeightMapBuilder(RESOLUTION, BOUNDS, reduction="max")
-    builder_mean = HeightMapBuilder(RESOLUTION, BOUNDS, reduction="mean")
-    hm_max = builder_max.build(pts)
-    hm_mean = builder_mean.build(pts)
-    hm_smooth = gaussian_smooth(hm_max, sigma=args.smooth_sigma)
-    x, y = grid_axes(hm_max.shape)
-
-    show_cloud = args.cloud_max_points > 0
-    cols = 4 if show_cloud else 3
-    titles = ["Raw cloud"] if show_cloud else []
-    titles += ["Max", "Mean", f"Max smoothed (σ={args.smooth_sigma})"]
-    fig = make_subplots(
-        rows=1,
-        cols=cols,
-        specs=[[{"type": "scene"}] * cols],
-        subplot_titles=titles,
+    pipe = TerrainPipeline(
+        resolution=RESOLUTION,
+        bounds=BOUNDS,
+        primary="max",
+        inpaint=True,
+        smooth_sigma=args.smooth_sigma,
+        traversability=TraversabilityConfig(),
     )
-
-    col = 1
-    if show_cloud:
-        if len(pts) > args.cloud_max_points:
-            idx = np.random.default_rng(0).choice(len(pts), args.cloud_max_points, replace=False)
-            sub = pts[idx]
-        else:
-            sub = pts
-        fig.add_trace(
-            go.Scatter3d(
-                x=sub[:, 0], y=sub[:, 1], z=sub[:, 2],
-                mode="markers",
-                marker=dict(size=1.2, color=sub[:, 2], colorscale="Viridis"),
-            ),
-            1, col,
-        )
-        col += 1
-    fig.add_trace(go.Surface(x=x, y=y, z=hm_max, colorscale="Viridis", showscale=False), 1, col); col += 1
-    fig.add_trace(go.Surface(x=x, y=y, z=hm_mean, colorscale="Viridis", showscale=False), 1, col); col += 1
-    fig.add_trace(go.Surface(x=x, y=y, z=hm_smooth, colorscale="Viridis", showscale=False), 1, col)
+    tm = pipe.process(pts)
+    x, y = grid_axes(tm.max.shape)
     xmin, xmax, ymin, ymax = BOUNDS
-    zmin = float(np.nanmin([np.nanmin(hm_max), np.nanmin(hm_mean), np.nanmin(hm_smooth), pts[:, 2].min()]))
-    zmax = float(np.nanmax([np.nanmax(hm_max), np.nanmax(hm_mean), np.nanmax(hm_smooth), pts[:, 2].max()]))
+
+    specs = [
+        [{"type": "scene"}, {"type": "scene"}, {"type": "scene"}, {"type": "scene"}],
+        [{"type": "scene"}, {"type": "scene"}, {"type": "scene"}, {"type": "scene"}],
+    ]
+    titles = (
+        "Raw cloud",
+        "Max",
+        "Mean",
+        f"Elevation (inpaint + σ={args.smooth_sigma} smooth)",
+        "Slope cost",
+        "Step-height cost",
+        "Roughness cost",
+        "Traversability (combined)",
+    )
+    fig = make_subplots(rows=2, cols=4, specs=specs, subplot_titles=titles,
+                        vertical_spacing=0.08)
+
+    # --- Row 1: 3D surfaces + raw cloud ---
+    if len(pts) > args.cloud_max_points:
+        idx = np.random.default_rng(0).choice(len(pts), args.cloud_max_points, replace=False)
+        sub = pts[idx]
+    else:
+        sub = pts
+    fig.add_trace(
+        go.Scatter3d(
+            x=sub[:, 0], y=sub[:, 1], z=sub[:, 2],
+            mode="markers",
+            marker=dict(size=1.2, color=sub[:, 2], colorscale="Viridis"),
+            showlegend=False,
+        ),
+        row=1, col=1,
+    )
+    fig.add_trace(go.Surface(x=x, y=y, z=tm.max, colorscale="Viridis", showscale=False),
+                  row=1, col=2)
+    fig.add_trace(go.Surface(x=x, y=y, z=tm.mean, colorscale="Viridis", showscale=False),
+                  row=1, col=3)
+    fig.add_trace(go.Surface(x=x, y=y, z=tm.elevation, colorscale="Viridis", showscale=False),
+                  row=1, col=4)
+
+    # --- Row 2: 3D surfaces colored by cost (z = elevation, color = cost) ---
+    cost_scale = "RdYlGn_r"  # green (0) = cheap, red (1) = expensive
+    cost_layers = [
+        ("Slope", tm.slope_cost),
+        ("Step", tm.step_cost),
+        ("Roughness", tm.roughness_cost),
+        ("Traversability", tm.traversability),
+    ]
+    for col, (name, cost) in enumerate(cost_layers, start=1):
+        fig.add_trace(
+            go.Surface(
+                x=x, y=y,
+                z=tm.elevation,
+                surfacecolor=cost,
+                colorscale=cost_scale,
+                cmin=0.0, cmax=1.0,
+                showscale=(col == 4),
+                colorbar=dict(title="cost", len=0.45, y=0.22) if col == 4 else None,
+            ),
+            row=2, col=col,
+        )
+
+    # --- Layout ---
+    zmin = float(np.nanmin([np.nanmin(tm.max), np.nanmin(tm.mean),
+                             np.nanmin(tm.elevation), pts[:, 2].min()]))
+    zmax = float(np.nanmax([np.nanmax(tm.max), np.nanmax(tm.mean),
+                             np.nanmax(tm.elevation), pts[:, 2].max()]))
     scene = dict(
         xaxis=dict(range=[xmin, xmax]),
         yaxis=dict(range=[ymin, ymax]),
         zaxis=dict(range=[zmin, zmax]),
         aspectmode="cube",
     )
+    scene_keys = {f"scene{i}" if i > 1 else "scene": scene for i in range(1, 9)}
     fig.update_layout(
-        title=f"Heightmap [{args.preset}] ({hm_max.shape[1]}×{hm_max.shape[0]} @ {RESOLUTION} m/cell)",
-        height=600,
-        scene=scene,
-        scene2=scene,
-        scene3=scene,
-        scene4=scene,
+        title=f"Terrain pipeline [{args.preset}] "
+              f"({tm.max.shape[1]}×{tm.max.shape[0]} @ {RESOLUTION} m/cell)",
+        height=900,
+        **scene_keys,
     )
+
     out = "heightmap.html"
     fig.write_html(out, include_plotlyjs="cdn")
     print(f"Wrote {out}")
-    print(f"max:  z=[{np.nanmin(hm_max):.3f}, {np.nanmax(hm_max):.3f}]")
-    print(f"mean: z=[{np.nanmin(hm_mean):.3f}, {np.nanmax(hm_mean):.3f}]")
+    print(f"max:  z=[{np.nanmin(tm.max):.3f}, {np.nanmax(tm.max):.3f}]")
+    print(f"mean: z=[{np.nanmin(tm.mean):.3f}, {np.nanmax(tm.mean):.3f}]")
+    print(f"slope       cost=[{tm.slope_cost.min():.3f}, {tm.slope_cost.max():.3f}]")
+    print(f"step        cost=[{tm.step_cost.min():.3f}, {tm.step_cost.max():.3f}]")
+    print(f"roughness   cost=[{tm.roughness_cost.min():.3f}, {tm.roughness_cost.max():.3f}]")
+    print(f"traversable cost=[{tm.traversability.min():.3f}, {tm.traversability.max():.3f}]")
 
 
 if __name__ == "__main__":

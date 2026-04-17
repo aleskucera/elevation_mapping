@@ -26,7 +26,7 @@ def time_build(builder: HeightMapBuilder, pts: np.ndarray, runs: int) -> list[fl
 
 
 def main() -> None:
-    builder = HeightMapBuilder(RESOLUTION, BOUNDS, reduction="max")
+    builder = HeightMapBuilder(RESOLUTION, BOUNDS)
     print(f"{'N':>10} {'median (ms)':>12} {'min (ms)':>10} {'M pts/s':>10}")
     for n in SIZES:
         pts = make_synthetic_cloud(n=n)

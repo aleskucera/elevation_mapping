@@ -31,10 +31,10 @@ def main() -> None:
         f"points: {len(pts)}  bounds x=[{xmin:.2f},{xmax:.2f}] y=[{ymin:.2f},{ymax:.2f}] z=[{zmin:.2f},{zmax:.2f}]"
     )
 
-    b_max = HeightMapBuilder(args.resolution, bounds, reduction="max")
-    b_mean = HeightMapBuilder(args.resolution, bounds, reduction="mean")
-    hm_max = b_max.build(pts)
-    hm_mean = b_mean.build(pts)
+    builder = HeightMapBuilder(args.resolution, bounds)
+    layers = builder.build(pts)
+    hm_max = layers.max
+    hm_mean = layers.mean
     hm_smooth = gaussian_smooth(hm_max, sigma=args.smooth_sigma)
     print(f"heightmap shape: {hm_max.shape}  filled: {np.isfinite(hm_max).sum()}/{hm_max.size}")
 
