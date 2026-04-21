@@ -66,9 +66,9 @@ After the current round of optimizations:
    single kernel launch itself. Nothing obvious left without changing
    algorithms (voxel downsample first, range-image filter, …).
 2. **Inpaint (23%)** — dense Jacobi over a 5-level pyramid, ~800 kernel
-   invocations per frame. Mostly wasted work on cells that aren't holes. See
-   the [sparse-inpaint options discussion](../README.md) in project notes; not
-   yet implemented.
+   invocations per frame. Mostly wasted work on cells that aren't holes.
+   Sparse iteration or a push-pull pyramid would replace this; not yet
+   implemented.
 3. **Download (10%)** — constant with selective download off. See above.
 
 Everything else is < 5% and roughly at its per-launch floor — fusing these

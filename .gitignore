@@ -16,3 +16,6 @@ __pycache__/
 
 # Claude Code
 .claude/
+
+# MkDocs build output
+site/
