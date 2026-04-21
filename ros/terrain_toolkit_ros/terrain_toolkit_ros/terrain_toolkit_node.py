@@ -22,7 +22,6 @@ from rcl_interfaces.msg import (
 import tf2_ros
 from tf2_ros import TransformException
 from geometry_msgs.msg import TransformStamped
-import tf_transformations
 
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
@@ -36,6 +35,20 @@ from terrain_toolkit import (
     TerrainPipeline,
     TraversabilityConfig,
 )
+
+
+def _quaternion_to_matrix(x: float, y: float, z: float, w: float) -> np.ndarray:
+    n = x * x + y * y + z * z + w * w
+    s = 0.0 if n == 0.0 else 2.0 / n
+    xx, yy, zz = x * x * s, y * y * s, z * z * s
+    xy, xz, yz = x * y * s, x * z * s, y * z * s
+    wx, wy, wz = w * x * s, w * y * s, w * z * s
+    return np.array([
+        [1.0 - (yy + zz), xy - wz,         xz + wy,         0.0],
+        [xy + wz,         1.0 - (xx + zz), yz - wx,         0.0],
+        [xz - wy,         yz + wx,         1.0 - (xx + yy), 0.0],
+        [0.0,             0.0,             0.0,             1.0],
+    ], dtype=np.float64)
 
 
 # Parameters that require rebuilding the TerrainPipeline when changed.
@@ -409,7 +422,7 @@ class TerrainToolkitNode(Node):
 
         t = transform.transform.translation
         r = transform.transform.rotation
-        T = tf_transformations.quaternion_matrix([r.x, r.y, r.z, r.w])
+        T = _quaternion_to_matrix(r.x, r.y, r.z, r.w)
         T[0, 3] = t.x
         T[1, 3] = t.y
         T[2, 3] = t.z
