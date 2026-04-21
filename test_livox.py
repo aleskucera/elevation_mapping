@@ -32,9 +32,9 @@ def main() -> None:
     )
 
     builder = HeightMapBuilder(args.resolution, bounds)
-    layers = builder.build(pts)
-    hm_max = layers.max
-    hm_mean = layers.mean
+    layers = builder.build(pts).to_numpy()
+    hm_max = layers["max"]
+    hm_mean = layers["mean"]
     hm_smooth = gaussian_smooth(hm_max, sigma=args.smooth_sigma)
     print(f"heightmap shape: {hm_max.shape}  filled: {np.isfinite(hm_max).sum()}/{hm_max.size}")
 

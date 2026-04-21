@@ -4,11 +4,19 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+import warp as wp
 
-from .grid_filter import FilterConfig, GridMapFilter
-from .height_map_builder import HeightMapBuilder
-from .postprocess import gaussian_smooth, multigrid_inpaint
-from .traversability import GeometricTraversabilityAnalyzer, TraversabilityConfig
+from .heightmap import HeightMapBuilder
+from .heightmap import gaussian_smooth
+from .heightmap import multigrid_inpaint
+from .outlier import OutlierFilterConfig
+from .outlier import StatisticalOutlierFilter
+from .traversability import FilterConfig
+from .traversability import GeometricTraversabilityAnalyzer
+from .traversability import ObstacleInflator
+from .traversability import SupportRatioMask
+from .traversability import TemporalGate
+from .traversability import TraversabilityConfig
 
 PrimaryLayer = Literal["max", "mean", "min"]
 
@@ -64,6 +72,10 @@ class TerrainPipeline:
     Single entry point: `process(points)` returns a fully-populated
     `TerrainMap`. Stateful: reuses GPU buffers and filter hysteresis across
     calls, so the same instance should be reused frame-to-frame.
+
+    Internally keeps data on the GPU: point cloud is uploaded once, every
+    stage consumes and produces `wp.array`, and a single download happens
+    at the end to build the numpy-backed `TerrainMap` for the caller.
     """
 
     def __init__(
@@ -77,6 +89,7 @@ class TerrainPipeline:
         inpaint_iters_per_level: int = 50,
         inpaint_coarse_iters: int = 200,
         z_max: float | None = None,
+        outlier: OutlierFilterConfig | None = None,
         traversability: TraversabilityConfig | None = None,
         filter: FilterConfig | None = None,
     ):
@@ -102,6 +115,10 @@ class TerrainPipeline:
         self.height = self.builder.height
         self.width = self.builder.width
 
+        self.outlier_filter: StatisticalOutlierFilter | None = None
+        if outlier is not None:
+            self.outlier_filter = StatisticalOutlierFilter(config=outlier)
+
         self.analyzer: GeometricTraversabilityAnalyzer | None = None
         if traversability is not None:
             self.analyzer = GeometricTraversabilityAnalyzer(
@@ -111,9 +128,18 @@ class TerrainPipeline:
                 config=traversability,
             )
 
-        self.filter: GridMapFilter | None = None
+        self.inflator: ObstacleInflator | None = None
+        self.temporal_gate: TemporalGate | None = None
+        self.support_mask: SupportRatioMask | None = None
         if filter is not None:
-            self.filter = GridMapFilter(
+            self.inflator = ObstacleInflator(
+                resolution=resolution,
+                height=self.height,
+                width=self.width,
+                config=filter,
+            )
+            self.temporal_gate = TemporalGate(config=filter)
+            self.support_mask = SupportRatioMask(
                 resolution=resolution,
                 height=self.height,
                 width=self.width,
@@ -123,8 +149,16 @@ class TerrainPipeline:
     def process(self, points: np.ndarray) -> TerrainMap:
         if self.z_max is not None:
             points = points[points[:, 2] <= self.z_max]
-        layers = self.builder.build(points)
-        primary_layer = getattr(layers, self.primary)
+
+        # Single upload to GPU — every stage below consumes wp.array.
+        pts_wp = wp.array(
+            np.ascontiguousarray(points, dtype=np.float32), dtype=wp.vec3,
+        )
+        if self.outlier_filter is not None:
+            pts_wp = self.outlier_filter.apply(pts_wp)
+
+        layers = self.builder.build(pts_wp)
+        primary_layer = layers[self.primary]  # wp.array
 
         elevation = primary_layer
         if self.inpaint:
@@ -136,26 +170,38 @@ class TerrainPipeline:
         if self.smooth_sigma > 0.0:
             elevation = gaussian_smooth(elevation, sigma=self.smooth_sigma)
 
+        traversability_wp: wp.array | None = None
+        costs_wp: dict[str, wp.array] | None = None
+        if self.analyzer is not None:
+            costs = self.analyzer.compute(elevation)
+            total = costs.total
+            if self.inflator is not None:
+                # Inflate obstacles, then temporally gate, then mask by support ratio.
+                # Inpainted cells with enough real neighbors keep their cost; the rest
+                # become NaN, and frames that spike in obstacle count are rejected.
+                inflated = self.inflator.apply(total)
+                if self.temporal_gate.is_stable(inflated):
+                    total = self.support_mask.apply(primary_layer, inflated)
+                else:
+                    total = self.support_mask.rejected_frame()
+            traversability_wp = total
+            costs_wp = {"slope": costs.slope, "step": costs.step, "roughness": costs.roughness}
+
+        # Single download barrier: sync once, then batch-copy all layers to CPU.
+        wp.synchronize()
         tm = TerrainMap(
             resolution=self.resolution,
             bounds=self.bounds,
-            max=layers.max,
-            mean=layers.mean,
-            min=layers.min,
-            count=layers.count,
-            elevation=elevation,
+            max=layers.max.numpy().copy(),
+            mean=layers.mean.numpy().copy(),
+            min=layers.min.numpy().copy(),
+            count=layers.count.numpy().copy(),
+            elevation=elevation.numpy().copy(),
         )
-
-        if self.analyzer is not None:
-            costs = self.analyzer.compute(elevation)
-            tm.slope_cost = costs.slope
-            tm.step_cost = costs.step
-            tm.roughness_cost = costs.roughness
-            total = costs.total
-            if self.filter is not None:
-                # Support-ratio filter decides which cells are trustworthy —
-                # inpainted cells with enough real neighbors keep their cost.
-                total = self.filter.apply(primary_layer, total)
-            tm.traversability = total
-
+        if costs_wp is not None:
+            tm.slope_cost = costs_wp["slope"].numpy().copy()
+            tm.step_cost = costs_wp["step"].numpy().copy()
+            tm.roughness_cost = costs_wp["roughness"].numpy().copy()
+        if traversability_wp is not None:
+            tm.traversability = traversability_wp.numpy().copy()
         return tm

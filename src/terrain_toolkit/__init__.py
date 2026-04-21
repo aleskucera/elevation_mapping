@@ -1,9 +1,19 @@
-from .grid_filter import FilterConfig, GridMapFilter
-from .height_map_builder import HeightMapBuilder, HeightMapLayers
+from .heightmap import (
+    HeightMapBuilder,
+    HeightMapLayers,
+    diffuse_inpaint,
+    gaussian_smooth,
+    multigrid_inpaint,
+)
+from .icp import IcpAligner, IcpConfig, IcpResult, voxel_downsample
+from .outlier import OutlierFilterConfig, StatisticalOutlierFilter
 from .pipeline import TerrainMap, TerrainPipeline
-from .postprocess import diffuse_inpaint, gaussian_smooth, multigrid_inpaint
 from .traversability import (
+    FilterConfig,
     GeometricTraversabilityAnalyzer,
+    ObstacleInflator,
+    SupportRatioMask,
+    TemporalGate,
     TraversabilityConfig,
     TraversabilityCosts,
 )
@@ -11,9 +21,16 @@ from .traversability import (
 __all__ = [
     "FilterConfig",
     "GeometricTraversabilityAnalyzer",
-    "GridMapFilter",
     "HeightMapBuilder",
     "HeightMapLayers",
+    "IcpAligner",
+    "IcpConfig",
+    "IcpResult",
+    "ObstacleInflator",
+    "OutlierFilterConfig",
+    "StatisticalOutlierFilter",
+    "SupportRatioMask",
+    "TemporalGate",
     "TerrainMap",
     "TerrainPipeline",
     "TraversabilityConfig",
@@ -21,4 +38,5 @@ __all__ = [
     "diffuse_inpaint",
     "gaussian_smooth",
     "multigrid_inpaint",
+    "voxel_downsample",
 ]

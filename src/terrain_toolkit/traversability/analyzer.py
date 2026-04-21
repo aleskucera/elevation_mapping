@@ -6,8 +6,8 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from .grid_utils import meters_to_cells
-from .traversability_kernels import (
+from ..grid_utils import meters_to_cells
+from .kernels import (
     combine_costs_kernel,
     compute_roughness_kernel,
     compute_slope_sobel_kernel,
@@ -37,19 +37,31 @@ class TraversabilityConfig:
 
 @dataclass
 class TraversabilityCosts:
-    """Outputs of `GeometricTraversabilityAnalyzer.compute`."""
+    """Outputs of `GeometricTraversabilityAnalyzer.compute`.
 
-    slope: np.ndarray
-    step: np.ndarray
-    roughness: np.ndarray
-    total: np.ndarray
+    Fields are `wp.array` buffers owned by the analyzer — they are overwritten on
+    the next `compute()` call. Use `.to_numpy()` to retain values across frames.
+    """
+
+    slope: wp.array
+    step: wp.array
+    roughness: wp.array
+    total: wp.array
+
+    def to_numpy(self) -> dict[str, np.ndarray]:
+        return {
+            "slope": self.slope.numpy().copy(),
+            "step": self.step.numpy().copy(),
+            "roughness": self.roughness.numpy().copy(),
+            "total": self.total.numpy().copy(),
+        }
 
 
 class GeometricTraversabilityAnalyzer:
     """GPU pipeline that turns a filled heightmap into geometric cost layers.
 
     Preallocates Warp buffers so repeated `compute` calls on the same grid size
-    reuse device memory.
+    reuse device memory. Accepts heightmap as numpy or `wp.array`.
     """
 
     def __init__(
@@ -83,23 +95,31 @@ class GeometricTraversabilityAnalyzer:
             self._total = wp.zeros(self.shape, dtype=wp.float32)
             self._dilated = wp.zeros(self.shape, dtype=wp.float32)
             self._eroded = wp.zeros(self.shape, dtype=wp.float32)
-            self._elev = wp.zeros(self.shape, dtype=wp.float32)
 
-    def compute(self, heightmap: np.ndarray) -> TraversabilityCosts:
+        self._costs = TraversabilityCosts(
+            slope=self._slope, step=self._step, roughness=self._rough, total=self._total,
+        )
+
+    def compute(self, heightmap: np.ndarray | wp.array) -> TraversabilityCosts:
         """Run slope + step + roughness + combined cost on a filled heightmap."""
         if heightmap.shape != self.shape:
             raise ValueError(f"heightmap shape {heightmap.shape} != analyzer shape {self.shape}")
 
-        cfg = self.config
-        elev_np = np.ascontiguousarray(heightmap, dtype=np.float32)
-        self._elev.assign(wp.from_numpy(elev_np, device=self.device))
+        if isinstance(heightmap, wp.array):
+            elev = heightmap
+        else:
+            elev = wp.array(
+                np.ascontiguousarray(heightmap, dtype=np.float32),
+                dtype=wp.float32, device=self.device,
+            )
 
+        cfg = self.config
         with wp.ScopedTimer("GeometricTraversability", active=self.verbose):
             wp.launch(
                 compute_slope_sobel_kernel,
                 dim=self.shape,
                 inputs=[
-                    self._elev,
+                    elev,
                     float(self.resolution),
                     self.height,
                     self.width,
@@ -111,14 +131,14 @@ class GeometricTraversabilityAnalyzer:
             wp.launch(
                 morph_op_kernel,
                 dim=self.shape,
-                inputs=[self._elev, self.height, self.width, self.step_window_cells, 1],
+                inputs=[elev, self.height, self.width, self.step_window_cells, 1],
                 outputs=[self._dilated],
                 device=self.device,
             )
             wp.launch(
                 morph_op_kernel,
                 dim=self.shape,
-                inputs=[self._elev, self.height, self.width, self.step_window_cells, 0],
+                inputs=[elev, self.height, self.width, self.step_window_cells, 0],
                 outputs=[self._eroded],
                 device=self.device,
             )
@@ -133,7 +153,7 @@ class GeometricTraversabilityAnalyzer:
                 compute_roughness_kernel,
                 dim=self.shape,
                 inputs=[
-                    self._elev,
+                    elev,
                     self.height,
                     self.width,
                     self.roughness_window_cells,
@@ -156,11 +176,5 @@ class GeometricTraversabilityAnalyzer:
                 outputs=[self._total],
                 device=self.device,
             )
-        wp.synchronize()
 
-        return TraversabilityCosts(
-            slope=self._slope.numpy().copy(),
-            step=self._step.numpy().copy(),
-            roughness=self._rough.numpy().copy(),
-            total=self._total.numpy().copy(),
-        )
+        return self._costs
