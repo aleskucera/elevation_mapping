@@ -10,6 +10,8 @@ from .heightmap import HeightMapBuilder
 from .heightmap import gaussian_smooth
 from .heightmap import multigrid_inpaint
 from .outlier import OutlierFilterConfig
+from .outlier import RadiusOutlierFilter
+from .outlier import RadiusOutlierFilterConfig
 from .outlier import StatisticalOutlierFilter
 from .traversability import FilterConfig
 from .traversability import GeometricTraversabilityAnalyzer
@@ -20,31 +22,44 @@ from .traversability import TraversabilityConfig
 
 PrimaryLayer = Literal["max", "mean", "min"]
 
+LayerName = Literal[
+    "max", "mean", "min", "count",
+    "elevation",
+    "slope_cost", "step_cost", "roughness_cost", "traversability",
+]
+
+_ALL_LAYERS: tuple[str, ...] = (
+    "max", "mean", "min", "count",
+    "elevation",
+    "slope_cost", "step_cost", "roughness_cost", "traversability",
+)
+_COST_LAYERS: frozenset[str] = frozenset(
+    ("slope_cost", "step_cost", "roughness_cost", "traversability"),
+)
+
 
 @dataclass
 class TerrainMap:
-    """Full output of `TerrainPipeline.process`.
+    """Output of `TerrainPipeline.process`.
 
-    Always populated: `max`, `mean`, `min`, `count`, `elevation` (the primary
-    reduction after inpaint + smooth).
-
-    Populated when the corresponding stage is configured: `slope_cost`,
-    `step_cost`, `roughness_cost`, `traversability`.
+    Fields are populated only when their layer was selected for download (see
+    `TerrainPipeline(layers=...)`) *and* the corresponding stage was enabled.
+    Everything else is `None`.
     """
 
     resolution: float
     bounds: tuple[float, float, float, float]
 
     # raw reductions
-    max: np.ndarray
-    mean: np.ndarray
-    min: np.ndarray
-    count: np.ndarray
+    max: np.ndarray | None = None
+    mean: np.ndarray | None = None
+    min: np.ndarray | None = None
+    count: np.ndarray | None = None
 
-    # primary reduction after inpaint + smooth (always present)
-    elevation: np.ndarray
+    # primary reduction after inpaint + smooth
+    elevation: np.ndarray | None = None
 
-    # geometric cost layers (None when traversability is disabled)
+    # geometric cost layers (populated only when traversability is enabled)
     slope_cost: np.ndarray | None = None
     step_cost: np.ndarray | None = None
     roughness_cost: np.ndarray | None = None
@@ -52,14 +67,8 @@ class TerrainMap:
 
     def as_dict(self) -> dict[str, np.ndarray]:
         """Return all non-None layers as a flat name → array dict."""
-        d = {
-            "max": self.max,
-            "mean": self.mean,
-            "min": self.min,
-            "count": self.count,
-            "elevation": self.elevation,
-        }
-        for name in ("slope_cost", "step_cost", "roughness_cost", "traversability"):
+        d: dict[str, np.ndarray] = {}
+        for name in _ALL_LAYERS:
             arr = getattr(self, name)
             if arr is not None:
                 d[name] = arr
@@ -89,9 +98,10 @@ class TerrainPipeline:
         inpaint_iters_per_level: int = 50,
         inpaint_coarse_iters: int = 200,
         z_max: float | None = None,
-        outlier: OutlierFilterConfig | None = None,
+        outlier: OutlierFilterConfig | RadiusOutlierFilterConfig | None = None,
         traversability: TraversabilityConfig | None = None,
         filter: FilterConfig | None = None,
+        layers: tuple[str, ...] | None = None,
     ):
         if primary not in ("max", "mean", "min"):
             raise ValueError(f"primary must be 'max', 'mean', or 'min'; got {primary!r}")
@@ -101,6 +111,22 @@ class TerrainPipeline:
             )
         if filter is not None and traversability is None:
             raise ValueError("filter is only meaningful when traversability is enabled")
+
+        # Resolve which layers to download. `None` = everything the configured
+        # stages produce. Skipping unused layers saves a D2H copy each — about
+        # 0.05–0.1 ms per layer on an 80×150 grid.
+        if layers is None:
+            selected = set(_ALL_LAYERS)
+        else:
+            unknown = set(layers) - set(_ALL_LAYERS)
+            if unknown:
+                raise ValueError(
+                    f"unknown layer names {sorted(unknown)}; valid: {_ALL_LAYERS}"
+                )
+            selected = set(layers)
+        if traversability is None:
+            selected -= _COST_LAYERS
+        self._layers: set[str] = selected
 
         self.resolution = resolution
         self.bounds = bounds
@@ -115,8 +141,10 @@ class TerrainPipeline:
         self.height = self.builder.height
         self.width = self.builder.width
 
-        self.outlier_filter: StatisticalOutlierFilter | None = None
-        if outlier is not None:
+        self.outlier_filter: StatisticalOutlierFilter | RadiusOutlierFilter | None = None
+        if isinstance(outlier, RadiusOutlierFilterConfig):
+            self.outlier_filter = RadiusOutlierFilter(config=outlier)
+        elif isinstance(outlier, OutlierFilterConfig):
             self.outlier_filter = StatisticalOutlierFilter(config=outlier)
 
         self.analyzer: GeometricTraversabilityAnalyzer | None = None
@@ -187,21 +215,27 @@ class TerrainPipeline:
             traversability_wp = total
             costs_wp = {"slope": costs.slope, "step": costs.step, "roughness": costs.roughness}
 
-        # Single download barrier: sync once, then batch-copy all layers to CPU.
+        # Single download barrier: sync once, then copy only the selected layers.
         wp.synchronize()
-        tm = TerrainMap(
-            resolution=self.resolution,
-            bounds=self.bounds,
-            max=layers.max.numpy().copy(),
-            mean=layers.mean.numpy().copy(),
-            min=layers.min.numpy().copy(),
-            count=layers.count.numpy().copy(),
-            elevation=elevation.numpy().copy(),
-        )
+        sel = self._layers
+        tm = TerrainMap(resolution=self.resolution, bounds=self.bounds)
+        if "max" in sel:
+            tm.max = layers.max.numpy().copy()
+        if "mean" in sel:
+            tm.mean = layers.mean.numpy().copy()
+        if "min" in sel:
+            tm.min = layers.min.numpy().copy()
+        if "count" in sel:
+            tm.count = layers.count.numpy().copy()
+        if "elevation" in sel:
+            tm.elevation = elevation.numpy().copy()
         if costs_wp is not None:
-            tm.slope_cost = costs_wp["slope"].numpy().copy()
-            tm.step_cost = costs_wp["step"].numpy().copy()
-            tm.roughness_cost = costs_wp["roughness"].numpy().copy()
-        if traversability_wp is not None:
+            if "slope_cost" in sel:
+                tm.slope_cost = costs_wp["slope"].numpy().copy()
+            if "step_cost" in sel:
+                tm.step_cost = costs_wp["step"].numpy().copy()
+            if "roughness_cost" in sel:
+                tm.roughness_cost = costs_wp["roughness"].numpy().copy()
+        if traversability_wp is not None and "traversability" in sel:
             tm.traversability = traversability_wp.numpy().copy()
         return tm

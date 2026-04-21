@@ -6,7 +6,12 @@ from .heightmap import (
     multigrid_inpaint,
 )
 from .icp import IcpAligner, IcpConfig, IcpResult, voxel_downsample
-from .outlier import OutlierFilterConfig, StatisticalOutlierFilter
+from .outlier import (
+    OutlierFilterConfig,
+    RadiusOutlierFilter,
+    RadiusOutlierFilterConfig,
+    StatisticalOutlierFilter,
+)
 from .pipeline import TerrainMap, TerrainPipeline
 from .traversability import (
     FilterConfig,
@@ -28,6 +33,8 @@ __all__ = [
     "IcpResult",
     "ObstacleInflator",
     "OutlierFilterConfig",
+    "RadiusOutlierFilter",
+    "RadiusOutlierFilterConfig",
     "StatisticalOutlierFilter",
     "SupportRatioMask",
     "TemporalGate",

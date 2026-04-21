@@ -23,6 +23,10 @@ class TraversabilityConfig:
     # Normalization thresholds — cost saturates at 1 when these are reached.
     max_slope_deg: float = 60.0
     max_step_height_m: float = 0.55
+    # Drops saturate sooner than bumps by default: a 0.3 m ledge already gives
+    # cost 1, while a 0.3 m curb is ~0.55. Set equal to `max_step_height_m` to
+    # recover the old unsigned behavior.
+    max_drop_height_m: float = 0.3
     max_roughness_m: float = 0.2
 
     # Local window radii (in meters).
@@ -145,7 +149,13 @@ class GeometricTraversabilityAnalyzer:
             wp.launch(
                 compute_step_height_cost_kernel,
                 dim=self.shape,
-                inputs=[self._dilated, self._eroded, float(cfg.max_step_height_m)],
+                inputs=[
+                    elev,
+                    self._dilated,
+                    self._eroded,
+                    float(cfg.max_step_height_m),
+                    float(cfg.max_drop_height_m),
+                ],
                 outputs=[self._step],
                 device=self.device,
             )

@@ -62,15 +62,29 @@ def morph_op_kernel(
 
 @wp.kernel
 def compute_step_height_cost_kernel(
+    elevation: wp.array(dtype=wp.float32, ndim=2),
     dilated_map: wp.array(dtype=wp.float32, ndim=2),
     eroded_map: wp.array(dtype=wp.float32, ndim=2),
     step_norm_factor: wp.float32,
+    drop_norm_factor: wp.float32,
     step_height_cost: wp.array(dtype=wp.float32, ndim=2),
 ):
-    """Step-height cost = (dilated - eroded) / step_norm_factor, clamped to 1."""
+    """Signed step-height cost = max(bump_cost, drop_cost).
+
+    Splits `dilated - eroded` into a positive-obstacle part (`dilated - elev`,
+    nearby cells higher — curbs, rocks) and a negative-obstacle part
+    (`elev - eroded`, nearby cells lower — ledges, ditches), normalizes each by
+    its own saturation threshold, and returns the max. Lets callers weight
+    drops more aggressively than bumps, which matters for ground robots where
+    a cliff edge is usually worse than a comparable curb.
+    """
     r, c = wp.tid()
-    height_diff = dilated_map[r, c] - eroded_map[r, c]
-    step_height_cost[r, c] = wp.min(height_diff / step_norm_factor, 1.0)
+    z = elevation[r, c]
+    up = dilated_map[r, c] - z
+    down = z - eroded_map[r, c]
+    bump_cost = wp.min(up / step_norm_factor, 1.0)
+    drop_cost = wp.min(down / drop_norm_factor, 1.0)
+    step_height_cost[r, c] = wp.max(bump_cost, drop_cost)
 
 
 @wp.kernel
