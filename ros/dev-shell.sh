@@ -16,11 +16,16 @@ if [[ -f "$_dev_shell_repo/.venv/bin/activate" ]]; then
     # shellcheck disable=SC1091
     source "$_dev_shell_repo/.venv/bin/activate"
     # ament_python node scripts get a /usr/bin/python3 shebang (colcon forces
-    # system python), so export the venv's site-packages on PYTHONPATH to make
-    # terrain_toolkit + warp importable from the system interpreter too.
+    # system python), so expose what the venv holds on PYTHONPATH. Two entries
+    # are needed:
+    #   - the venv's site-packages: makes regular installs (warp, numpy, …) visible
+    #   - <repo>/src: exposes terrain_toolkit itself. The venv installs it as an
+    #     editable (.pth) entry, but .pth files are only processed inside "site"
+    #     directories — PYTHONPATH entries are added to sys.path directly and
+    #     their .pth files are ignored. Adding the source dir bypasses that.
     _dev_shell_site="$(ls -d "$_dev_shell_repo"/.venv/lib/python*/site-packages 2>/dev/null | head -1)"
     if [[ -n "$_dev_shell_site" ]]; then
-        export PYTHONPATH="$_dev_shell_site${PYTHONPATH:+:$PYTHONPATH}"
+        export PYTHONPATH="$_dev_shell_repo/src:$_dev_shell_site${PYTHONPATH:+:$PYTHONPATH}"
     fi
     unset _dev_shell_site
 else
